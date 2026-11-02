@@ -858,6 +858,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
 
 export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
     try {
+        if (config.apiFormat === "minimax") return ["MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"]; // MiniMax has no model-list endpoint; these are the documented video models.
         if (config.apiFormat === "gemini") {
             const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
             validateGeminiPayload(response.data);

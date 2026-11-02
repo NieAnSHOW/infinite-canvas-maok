@@ -3,7 +3,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
-import { clampVideoSeconds, computeVideoSize, inferVideoRatio } from "@/lib/media-size";
+import { clampVideoSeconds, computeVideoSize, inferVideoRatio, parseVideoResolution } from "@/lib/media-size";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
@@ -19,7 +19,7 @@ type VideoMediaOptions = RequestOptions & { videos?: ReferenceVideo[]; audios?: 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "plugin"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "gemini" | "minimax" | "plugin"; model: string };
 type GeminiInlineData = { bytesBase64Encoded: string; mimeType: string };
 type GeminiVideoOperation = {
     name?: string;
@@ -76,6 +76,7 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (requestConfig.apiFormat === "gemini") return createGeminiVideoTask(requestConfig, selectedModel, prompt, references, options);
+    if (requestConfig.apiFormat === "minimax") return createMiniMaxVideoTask(requestConfig, selectedModel, prompt, references, options);
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
@@ -87,6 +88,7 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (task.provider === "gemini") return pollGeminiVideoTask(requestConfig, task, options);
+    if (task.provider === "minimax") return pollMiniMaxVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -259,6 +261,69 @@ async function pollGeminiVideoTask(config: AiConfig, task: VideoGenerationTask, 
         if (!uri) return { status: "failed", error: apiText("noPlayableVideo") };
         const url = uri.includes("key=") ? uri : `${uri}${uri.includes("?") ? "&" : "?"}key=${config.apiKey}`;
         return { status: "completed", result: await videoResultFromUrl(url, options) };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
+}
+
+type MiniMaxContentItem = { type: "text"; text: string } | { type: "image_url" | "video_url" | "audio_url"; role: string } & Record<string, unknown>;
+type MiniMaxTask = { task_id?: string; task?: { status?: string; content?: { url?: string }; error?: { message?: string } } };
+
+/** MiniMax-H3 native API: POST /v2/video_generation (multimodal content[]), then GET /v2/query/video_generation/{task_id}. */
+function miniMaxUrl(config: Pick<AiConfig, "baseUrl">, path: string) {
+    return withLocalProxy(`${config.baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/i, "")}${path}`);
+}
+
+function miniMaxResolution(model: string, vquality: string) {
+    const p = Number(parseVideoResolution(vquality));
+    if (/^minimax-h3$/i.test(modelOptionName(model))) return p >= 1080 ? "2K" : "768P"; // base model: 768P / 2K only
+    return p <= 480 ? "480P" : "768P"; // Highspeed / Lite / Max: 480P / 768P only
+}
+
+async function createMiniMaxVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: VideoMediaOptions): Promise<VideoGenerationTask> {
+    const name = modelOptionName(model);
+    const images = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const videos = await Promise.all((options?.videos || []).map((video) => referenceMediaToFile(video, "ref.mp4", "invalidReferenceVideo", options)));
+    const audios = await Promise.all((options?.audios || []).map((audio) => referenceMediaToFile(audio, "ref.mp3", "invalidReferenceAudio", options)));
+    // First/last-frame and reference inputs are mutually exclusive in the API; video/audio/3+ images force reference mode.
+    const reference = resolveVideoMode(config.videoMode, images.length) === "reference" || videos.length > 0 || audios.length > 0;
+    const content: MiniMaxContentItem[] = [{ type: "text", text: prompt }];
+    if (reference) {
+        images.slice(0, 9).forEach((url) => content.push({ type: "image_url", image_url: { url }, role: "reference_image" }));
+        for (const file of videos) content.push({ type: "video_url", video_url: { url: await readFileAsDataUrl(file) }, role: "reference_video" });
+        for (const file of audios) content.push({ type: "audio_url", audio_url: { url: (await readFileAsDataUrl(file)).replace(/^data:audio\/(mpeg|x-mpeg|mp3)/i, "data:audio/mp3") }, role: "reference_audio" });
+    } else {
+        if (images[0]) content.push({ type: "image_url", image_url: { url: images[0] }, role: "first_frame" });
+        if (images[1]) content.push({ type: "image_url", image_url: { url: images[1] }, role: "last_frame" });
+    }
+    const ratio = inferVideoRatio(config.size || "auto");
+    // t2va needs a concrete ratio; i2va is always adaptive; Lite does not support adaptive.
+    const needsRatio = content.length === 1 || /lite/i.test(name);
+    const body = {
+        model: name,
+        content,
+        resolution: miniMaxResolution(model, config.vquality),
+        duration: Math.max(/-max$/i.test(name) ? 5 : 4, Math.min(15, Number(normalizeVideoSeconds(config.videoSeconds)))),
+        ratio: !reference && content.length > 1 ? "adaptive" : ratio === "auto" ? (needsRatio ? "16:9" : "adaptive") : ratio,
+        aigc_watermark: boolConfig(config.videoWatermark, false),
+    };
+    try {
+        const created = (await axios.post<MiniMaxTask>(miniMaxUrl(config, "/v2/video_generation"), body, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data;
+        if (!created.task_id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.task_id, provider: "minimax", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollMiniMaxVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const state = (await axios.get<MiniMaxTask>(miniMaxUrl(config, `/v2/query/video_generation/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data.task;
+        if (!state) throw new Error(apiText("videoTaskQueryFailed"));
+        if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: readApiErrorMessage(state.error?.message) || apiText("videoGenerationFailed") };
+        if (state.status !== "succeeded") return { status: "pending" };
+        if (!state.content?.url) return { status: "failed", error: apiText("noPlayableVideo") };
+        return { status: "completed", result: await videoResultFromUrl(state.content.url, options) };
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
