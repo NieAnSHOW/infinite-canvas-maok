@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Slider, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
@@ -9,17 +9,16 @@ import { useTranslation } from "react-i18next";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoModeLabel, videoSizeLabel } from "@/components/video-settings-panel";
-import { canvasThemes } from "@/lib/canvas-theme";
-import { clampVideoSeconds } from "@/lib/media-size";
-import { formatBytes, formatDuration } from "@/lib/image-utils";
+import { normalizeVideoResolutionValue, videoModeLabel } from "@/components/video-settings-panel";
+import { clampVideoSeconds, computeVideoSize } from "@/lib/media-size";
+import { formatBytes, formatDuration, readFileAsDataUrl } from "@/lib/image-utils";
 import { deleteStoredMedia, resolveMediaUrl } from "@/services/file-storage";
 import { resolveImageUrl, ensureImagePreview, getImagePreviewRevision, previewUrlFor, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
+import { requestImageQuestion } from "@/services/api/image";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import { boolConfig, modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
 
@@ -67,6 +66,10 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 const LOG_STORE_KEY = "infinite-canvas:auto_flow_video_generation_logs";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "auto_flow_video_generation_logs" });
 
+const ANALYSIS_PROMPT = "你是视频提示词反推专家。请观看视频，输出可直接用于 MiniMax H3 全能参考生视频的中文提示词。要求：1. 先用一两句话概述整体内容、风格与氛围；2. 按镜头逐条列出，每条包含时间段、景别、运镜、主体动作、转场、光线与音效；3. 视频中的核心商品统一替换为“产品”，并用“图1”到“图{{count}}”引用用户提供的产品参考图；4. 总时长控制在 8~10 秒，镜头数量相应精简；5. 只输出提示词正文，不要解释。";
+
+const VARIANT_PROMPT = "你是视频提示词改写专家。下面是从参考视频拆解出的分镜脚本。请在保持总时长 8~10 秒、镜头结构与产品露出的前提下，改写成一个更适合 MiniMax H3 全能参考生视频的变体：1. 保留核心卖点与节奏，但改写景别、运镜、转场、光线与动作细节，使画面不与原视频雷同；2. 继续用“产品”和“图1”到“图{{count}}”引用产品参考图，不要出现原视频中的品牌、人物或文字；3. 每个镜头写明时间段、景别、运镜、主体动作、光线与音效；4. 只输出改写后的提示词正文，不要解释。\n\n原脚本：\n{{script}}";
+
 export default function VideoPage() {
     const { message } = App.useApp();
     const { t } = useTranslation();
@@ -96,6 +99,12 @@ export default function VideoPage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [referenceDragTarget, setReferenceDragTarget] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
+    const videoInputRef = useRef<HTMLInputElement>(null);
+    const [sourceVideo, setSourceVideo] = useState<File | null>(null);
+    const [analysisModel, setAnalysisModel] = useState("");
+    const [analyzing, setAnalyzing] = useState(false);
+    const [confirmOpen, setConfirmOpen] = useState(false);
+    const [seconds, setSeconds] = useState(9);
     const videoCommand = useWorkbenchAgentStore((state) => state.videoCommand);
     const clearVideoCommand = useWorkbenchAgentStore((state) => state.clearVideoCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
@@ -103,7 +112,8 @@ export default function VideoPage() {
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
-    const canGenerate = Boolean(prompt.trim());
+    const textModel = analysisModel || effectiveConfig.textModel;
+    const canGenerate = Boolean(prompt.trim()) && references.length > 0;
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -198,6 +208,38 @@ export default function VideoPage() {
         }
     };
 
+    const analyzeVideo = async () => {
+        if (!sourceVideo) return void message.error(t("autoFlowVideo.videoRequired"));
+        if (!references.length) return void message.error(t("autoFlowVideo.productRequired"));
+        if (!isAiConfigReady(effectiveConfig, textModel)) {
+            message.warning(t("workbench.configFirst"));
+            openConfigDialog(true);
+            return;
+        }
+        setAnalyzing(true);
+        setPrompt("");
+        let script = "";
+        try {
+            const url = await readFileAsDataUrl(sourceVideo);
+            const content = [{ type: "text" as const, text: ANALYSIS_PROMPT.replace("{{count}}", String(references.length)) }, { type: "video_url" as const, video_url: { url } }];
+            const textConfig = { ...effectiveConfig, model: textModel, systemPrompt: "" };
+            script = await requestImageQuestion(textConfig, [{ role: "user", content }], setPrompt);
+            const variantPrompt = VARIANT_PROMPT.replace("{{count}}", String(references.length)).replace("{{script}}", () => script);
+            setPrompt("");
+            await requestImageQuestion(textConfig, [{ role: "user", content: variantPrompt }], setPrompt);
+            setConfirmOpen(true);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("workbench.generationFailed"));
+            // Variant step failed: keep the analyzed script so the user can still confirm and generate.
+            if (script) {
+                setPrompt(script);
+                setConfirmOpen(true);
+            }
+        } finally {
+            setAnalyzing(false);
+        }
+    };
+
     // Handle video-generation commands from the Agent panel by setting the prompt and optionally starting generation.
     useEffect(() => {
         if (!videoCommand || videoCommand.nonce === processedCommandRef.current) return;
@@ -231,7 +273,7 @@ export default function VideoPage() {
             openConfigDialog(true);
             return null;
         }
-        return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references] };
+        return { text, config: buildVideoConfig({ ...effectiveConfig, videoSeconds: String(seconds) }, model), references: [...references] };
     };
 
     const retryResult = () => {
@@ -360,12 +402,7 @@ export default function VideoPage() {
         setPrompt(log.prompt);
         setReferences(log.references || []);
         if (log.config.videoModel || log.model) updateConfig("videoModel", log.config.videoModel || log.model);
-        if (log.config.size) updateConfig("size", log.config.size);
-        if (log.config.vquality) updateConfig("vquality", log.config.vquality);
-        if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
-        if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
-        if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
-        if (log.config.videoMode) updateConfig("videoMode", log.config.videoMode);
+        if (log.config.videoSeconds) setSeconds(Number(log.config.videoSeconds));
         setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
 
@@ -393,6 +430,15 @@ export default function VideoPage() {
                         <div className="mt-6 space-y-5">
                             <div>
                                 <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-base font-semibold">{t("autoFlowVideo.sourceVideo")}</span>
+                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => videoInputRef.current?.click()}>
+                                        {t("workbench.upload")}
+                                    </Button>
+                                </div>
+                                <div className="truncate rounded-lg border border-dashed border-stone-300 px-3 py-4 text-center text-sm text-stone-500 dark:border-stone-700">{sourceVideo ? `${sourceVideo.name} · ${formatBytes(sourceVideo.size)}` : t("autoFlowVideo.noVideo")}</div>
+                            </div>
+                            <div>
+                                <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">{t("workbench.prompt")}</span>
                                     <div className="flex gap-2">
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
@@ -408,7 +454,7 @@ export default function VideoPage() {
 
                             <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">{t("videoWorkbench.references")}</span>
+                                    <span className="text-base font-semibold">{t("autoFlowVideo.productImages")}</span>
                                     <div className="flex gap-2">
                                         <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
                                             {t("workbench.clipboard")}
@@ -444,7 +490,7 @@ export default function VideoPage() {
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s · {videoModeLabel(effectiveConfig.videoMode)}
+                                    {modelOptionLabel(effectiveConfig, model)} · 720p · 9:16 · {seconds}s · {videoModeLabel("reference")}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     {t("workbench.adjust")}
@@ -452,14 +498,19 @@ export default function VideoPage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings config={effectiveConfig} model={model} textModel={textModel} onTextModelChange={setAnalysisModel} seconds={seconds} onSecondsChange={setSeconds} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                             </div>
                         </div>
 
                         <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                {t("workbench.generate")}
-                            </Button>
+                            <div className="grid gap-2">
+                                <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={analyzing} disabled={!sourceVideo || !references.length || analyzing || running} onClick={() => void analyzeVideo()}>
+                                    {t("autoFlowVideo.analyze")}
+                                </Button>
+                                <Button size="large" block loading={running} disabled={!canGenerate || running || analyzing} onClick={() => void generate()}>
+                                    {t("autoFlowVideo.generateOnly")}
+                                </Button>
+                            </div>
                         </div>
                     </div>
 
@@ -492,12 +543,23 @@ export default function VideoPage() {
                     event.target.value = "";
                 }}
             />
+            <input
+                ref={videoInputRef}
+                type="file"
+                accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,.mp4,.mov,.avi,.mkv"
+                className="hidden"
+                onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) setSourceVideo(file);
+                    event.target.value = "";
+                }}
+            />
             <Drawer title={t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
                 <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings config={effectiveConfig} model={model} textModel={textModel} onTextModelChange={setAnalysisModel} seconds={seconds} onSecondsChange={setSeconds} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
@@ -505,12 +567,15 @@ export default function VideoPage() {
             <Modal title={t("workbench.deleteLogs")} open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText={t("common.delete")} okButtonProps={{ danger: true }} cancelText={t("common.cancel")}>
                 {t("workbench.deleteLogsConfirm", { count: selectedLogIds.length })}
             </Modal>
+            <Modal title={t("autoFlowVideo.confirmTitle")} open={confirmOpen} onCancel={() => setConfirmOpen(false)} onOk={() => { setConfirmOpen(false); void generate(); }} okText={t("autoFlowVideo.confirmGenerate")} cancelText={t("common.cancel")} okButtonProps={{ disabled: !canGenerate }} width={640}>
+                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={14} />
+                <div className="mt-2 text-xs text-stone-500 dark:text-stone-400">{t("autoFlowVideo.fixedSpec")}</div>
+            </Modal>
         </div>
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+function GenerationSettings({ config, model, textModel, onTextModelChange, seconds, onSecondsChange, updateConfig, openConfigDialog }: { config: AiConfig; model: string; textModel: string; onTextModelChange: (value: string) => void; seconds: number; onSecondsChange: (value: number) => void; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
     const { t } = useTranslation();
 
     return (
@@ -519,8 +584,17 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
+            <label className="col-span-2 block min-w-0 sm:col-span-1">
+                <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("autoFlowVideo.analysisModel")}</span>
+                <ModelPicker config={config} value={textModel} onChange={onTextModelChange} capability="text" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+            </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <div className="mb-1 flex items-center justify-between text-sm font-semibold sm:text-base">
+                    <span>{t("autoFlowVideo.seconds")}</span>
+                    <span>{seconds}s</span>
+                </div>
+                <Slider min={8} max={10} step={1} value={seconds} onChange={onSecondsChange} />
+                <div className="text-xs text-stone-500 dark:text-stone-400">{t("autoFlowVideo.fixedSpec")}</div>
             </div>
         </>
     );
@@ -720,8 +794,12 @@ function ReferenceOrderButtons({ index, total, onMove }: { index: number; total:
     if (total <= 1) return null;
     return (
         <div className="absolute inset-x-1 bottom-1 flex justify-between">
-            <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowLeft className="size-3" />} disabled={index <= 0} onClick={() => onMove(-1)} />
-            <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
+            <button type="button" className="flex size-6 items-center justify-center rounded-full bg-black/60 text-white disabled:opacity-30" disabled={index <= 0} onClick={() => onMove(-1)}>
+                <ArrowLeft className="size-3" />
+            </button>
+            <button type="button" className="flex size-6 items-center justify-center rounded-full bg-black/60 text-white disabled:opacity-30" disabled={index >= total - 1} onClick={() => onMove(1)}>
+                <ArrowRight className="size-3" />
+            </button>
         </div>
     );
 }
@@ -775,22 +853,18 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         ...config,
         model,
         videoModel: model,
-        size: normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
-        vquality: normalizeResolution(config.vquality),
+        size: computeVideoSize("720", "9:16"),
+        videoSeconds: String(Math.min(10, Math.max(8, Number(normalizeVideoSeconds(config.videoSeconds))))),
+        vquality: "720",
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
-        videoMode: config.videoMode === "reference" ? "reference" : "frames",
+        videoMode: "reference",
     };
 }
 
 function normalizeVideoSeconds(value: string) {
     if (String(value).trim() === "-1") return "-1";
     return clampVideoSeconds(value);
-}
-
-function normalizeVideoSize(value: string) {
-    return normalizeVideoSizeValue(value);
 }
 
 function normalizeResolution(value: string) {
