@@ -1,0 +1,30 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "InfiniteCanvas",
+    "version": "0.1.0",
+    "identifier": "com.basketikun.infinite-canvas",
+    "build": {},
+    "app": {
+        "windows": [
+            {
+                "label": "main",
+                "title": "无限画布",
+                "url": "http://8.134.101.124:13000",
+                "width": 1440,
+                "height": 900,
+                "minWidth": 1024,
+                "minHeight": 680,
+                "center": true,
+                "additionalBrowserArgs": "--disable-web-security --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": ["nsis"],
+        "icon": ["icons/icon.ico", "icons/icon.png"]
+    }
+}

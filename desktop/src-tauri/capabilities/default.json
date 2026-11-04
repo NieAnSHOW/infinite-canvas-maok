@@ -1,0 +1,10 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Grants the deployed web app access to the opener plugin so external links open in the system default browser.",
+    "windows": ["main"],
+    "remote": {
+        "urls": ["http://8.134.101.124:13000"]
+    },
+    "permissions": ["core:default", "opener:allow-open-url"]
+}

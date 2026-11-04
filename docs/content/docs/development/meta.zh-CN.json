@@ -4,6 +4,7 @@
   "defaultOpen": true,
   "pages": [
     "local-development",
+    "desktop-shell",
     "canvas-data-structure",
     "local-codex-canvas"
   ]

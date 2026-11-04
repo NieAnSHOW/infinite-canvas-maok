@@ -2,9 +2,17 @@
 
 Infinite Canvas 的本地转发代理。浏览器直连第三方 AI 接口时经常被 CORS 拦截，启动它之后，网页会把请求先发到本机，再由本机转发到目标地址。
 
+通过局域网 IP 等非本机地址访问 Infinite Canvas 时，浏览器直连 MiniMax 官方接口等会被 CORS 拦截；在打开页面的那台电脑上运行本代理即可解决。
+
 代理只做转发：不改写请求体，不校验 API Key，不落盘任何日志。
 
 ## 使用
+
+### Windows 双击启动
+
+双击运行本目录下的 `canvas-proxy.bat`。脚本会自动检查 Node.js 环境（未安装或版本低于 18 时提示安装地址并保持窗口可读），优先运行同目录的 `index.js`；把 `canvas-proxy.bat` 和 `index.js` 一起分发即可完全离线使用，只分发 `canvas-proxy.bat` 时会自动改用 `npx` 拉取已发布包，首次运行需要联网。命令行参数原样透传，例如 `canvas-proxy.bat --port 23210`。
+
+### 命令行启动
 
 ```bash
 npx @basketikun/canvas-proxy@latest
@@ -46,6 +54,19 @@ http://127.0.0.1:23210/https://api.openai.com/v1/models
 ```
 
 日志在收到上游响应头时打印，所以流式请求会立刻出现一行，而不是等整段响应结束。日志只输出到终端，不落盘，也不包含请求头和请求体，因此不会泄露 API Key。
+
+## 公网 HTTP 部署时请把代理放到服务器上
+
+页面通过公网 IP 以 HTTP 打开时（例如 Docker 部署在云服务器上），Chrome 的 Local Network Access 保护会直接禁止页面访问使用者电脑的 `127.0.0.1` 或局域网地址，报错形如 `The request client is not a secure context and the resource is in more-private address space "loopback"`。这种部署下各使用者电脑上运行的 `canvas-proxy.bat` 无法被页面访问，属于浏览器安全策略，代理本身无法绕过。
+
+解决办法是在部署页面的服务器上运行本代理并开放对应端口，所有使用者把「配置 → 本地代理」的地址填成 `http://<服务器IP>:23210`：
+
+```bash
+docker run -d --name canvas-proxy --restart unless-stopped -p 23210:23210 \
+  node:22-alpine npx --yes @basketikun/canvas-proxy@latest --host 0.0.0.0
+```
+
+服务器访问 npm 较慢时可加 `-e npm_config_registry=https://registry.npmmirror.com`。注意这等于把一个公开转发端点暴露到公网，任何人都能借它中继请求，请配合安全组把端口来源限制到实际使用者，或仅在使用期间开放。
 
 ## 安全提示
 

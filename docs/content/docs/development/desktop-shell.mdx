@@ -1,0 +1,37 @@
+---
+title: Desktop Shell
+description: Tauri shell that loads the deployed app without CORS restrictions
+---
+
+# Desktop Shell
+
+The `desktop/` directory contains a Tauri v2 shell for Windows. The shell embeds no application code: it loads the deployed Infinite Canvas (default `http://8.134.101.124:13000`) and passes `--disable-web-security` to its WebView2 instance, so the WebView no longer enforces CORS preflights or Private Network Access blocks. Direct calls to providers such as the MiniMax video API work without any proxy, and because the content comes from the server, redeploying the server updates every installed shell on the next launch.
+
+## Build
+
+Prerequisites: Rust stable (MSVC toolchain), Visual Studio Build Tools with the C++ desktop workload, the WebView2 runtime (preinstalled on Windows 10/11), and Node.js or Bun.
+
+```bash
+cd desktop
+npm install        # or bun install
+npm run icon       # first time: generate src-tauri/icons/ from app-icon.png
+npm run build      # produces the NSIS installer
+```
+
+The installer lands in `desktop/src-tauri/target/release/bundle/nsis/` and can be distributed as-is. `npm run dev` opens a debug shell window without bundling.
+
+## Changing the loaded address
+
+Edit the window `url` in `desktop/src-tauri/tauri.conf.json` and the matching origin in `desktop/src-tauri/capabilities/default.json` (`remote.urls`), then rebuild.
+
+## Security boundaries
+
+`--disable-web-security` only affects the shell's own WebView process and never the user's normal browsers. It disables same-origin protections inside that WebView, so the server being loaded is the trust boundary: if the server is compromised or the HTTP transport is tampered with, injected scripts can read the API keys stored in the shell. Moving the deployment behind an HTTPS domain closes the transport-tampering part. `additionalBrowserArgs` replaces the WebView2 defaults, which is why the Tauri default `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection` is kept in the value.
+
+## External links
+
+The WebView cannot open new windows by itself. `desktop/src-tauri/src/main.rs` injects a script after every page load that reroutes `window.open` and `target="_blank"` links through `tauri-plugin-opener`, opening them in the system default browser.
+
+## Data storage
+
+Canvases, assets, and API keys live in the shell's own WebView2 user data directory (isolated by the app identifier), separate from the user's browsers and preserved across restarts. The shell itself has no auto-update mechanism; shell upgrades require redistributing the installer, while application updates arrive automatically from the server.

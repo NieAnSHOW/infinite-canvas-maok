@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] 新增 Tauri 桌面壳工程 `desktop/`，加载线上部署地址并关闭 webview 安全校验，免代理直连各 AI 接口并支持热更新。
++ [新增] 本地代理新增 Windows 一键启动脚本 `canvas-proxy.bat`，双击即可运行（自动检查 Node.js，优先使用同目录 `index.js`，缺失时回退 npx 拉取），便于分发给通过非本机地址访问、直连 MiniMax 等接口被跨域拦截的用户。
 + [新增] 新增 `/auto-flow-video` 路由，以独立页面复制视频工作台，便于单独迭代自动流程视频功能。
 + [新增] 主导航新增「自动化产出」入口，指向 `/auto-flow-video` 页面。
 + [新增] 渠道协议新增 MiniMax，原生接入 MiniMax-H3 视频生成接口（`/v2/video_generation`），支持文生视频、首尾帧、全能参考（图/视频/音频），默认 Base URL 为 `https://api.minimax.cn`。

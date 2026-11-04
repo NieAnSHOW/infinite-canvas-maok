@@ -1,0 +1,41 @@
+# Infinite Canvas 桌面壳（Tauri）
+
+用 Tauri v2 打包的 Windows 桌面壳。壳本身不包含业务代码，只加载线上部署的 Infinite Canvas（默认 `http://8.134.101.124:13000`），并通过 WebView2 启动参数关闭该 webview 的 web 安全校验（`--disable-web-security`），从而：
+
+- 浏览器直连 MiniMax 官方接口等被 CORS 预检拦截的问题不再存在，**无需配置任何本地代理或服务器代理**；
+- 非安全上下文页面无法访问本机回环地址（Chrome PNA/LNA）的限制不再适用；
+- 壳只是加载器，**服务器重新部署后，重启壳即拿到最新版本**（热更新），无需重新分发安装包。
+
+## 前置条件
+
+- Rust stable（MSVC 工具链）：https://rustup.rs
+- Visual Studio Build Tools（「使用 C++ 的桌面开发」工作负载）
+- WebView2 运行时（Windows 10/11 一般自带）
+- Node.js 或 Bun（用于运行 `@tauri-apps/cli`）
+
+## 构建步骤
+
+```bash
+cd desktop
+npm install        # 或 bun install
+npm run icon       # 首次：由 app-icon.png 生成 src-tauri/icons/ 全套图标
+npm run build      # 产出 NSIS 安装包
+```
+
+安装包位于 `src-tauri/target/release/bundle/nsis/`，直接分发给使用者。`npm run dev` 可跳过打包直接调试壳窗口。
+
+## 更换加载地址
+
+改 `src-tauri/tauri.conf.json` 里窗口的 `url`（以及 `src-tauri/capabilities/default.json` 里 `remote.urls` 的同源地址），重新 `npm run build` 即可。
+
+## 安全边界
+
+`--disable-web-security` 只作用于壳自己的 webview 进程，不影响使用者机器上的正常浏览器。它关闭的是该 webview 内的同源保护，因此**信任对象是所加载的服务器本身**：服务器被入侵或传输被劫持（HTTP 部署）时，注入的脚本可以读取壳内保存的 API Key。给部署上 HTTPS 域名可以收掉传输劫持这一环。`additionalBrowserArgs` 会整体替换 WebView2 默认参数，所以保留了 Tauri 默认的 `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`。
+
+## 外链行为
+
+webview 自己无法开新窗口，`src/main.rs` 在每次页面加载后注入脚本，把 `window.open` 和 `target="_blank"` 链接转发给 `tauri-plugin-opener`，用系统默认浏览器打开。
+
+## 数据存储
+
+画布、资产和 API Key 保存在壳自己的 WebView2 用户数据目录（按 `identifier` 隔离），与使用者浏览器互不相通，重启保留。目前没有自动更新机制，壳升级需要重新分发安装包（业务功能更新不受影响，见开头热更新说明）。
