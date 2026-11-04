@@ -18,9 +18,9 @@ export class AuthError extends Error {
 }
 
 type Envelope<T> = { code: number; message: string; data: T };
-type LoginResult = { token: string; expiresIn: number; refreshToken: string; refreshExpiresIn: number };
+type LoginResult = { accessToken: string; expiresIn: number; refreshToken: string; refreshExpiresIn: number };
 type RefreshResult = { accessToken: string; expiresIn: number };
-type MemberInfo = { id: number; username: string; nickname: string; avatar: string };
+type AdminInfo = { id: number; username: string; nickname: string; avatar: string; email: string; mobile: string };
 export type ClickCaptcha = { id: string; text: string[]; base64: string; width: number; height: number };
 
 const http = axios.create({ baseURL: BASE_URL });
@@ -34,7 +34,7 @@ export function refreshAccessToken(): Promise<string> {
     refreshing = (async () => {
         const { refreshToken, refreshExpiresAt } = useUserStore.getState();
         if (!refreshToken || (refreshExpiresAt && refreshExpiresAt <= Date.now())) throw new AuthError("session expired", CODE_UNAUTHORIZED);
-        const res = await http.post<Envelope<RefreshResult>>("/member/auth/refresh", { refreshToken });
+        const res = await http.post<Envelope<RefreshResult>>("/admin/auth/refresh", { refreshToken });
         if (res.data.code !== CODE_OK || !res.data.data?.accessToken) throw new AuthError(res.data.message, res.data.code);
         useUserStore.getState().setSession({ accessToken: res.data.data.accessToken });
         return res.data.data.accessToken;
@@ -46,8 +46,9 @@ export function refreshAccessToken(): Promise<string> {
 
 http.interceptors.request.use((config) => {
     const { accessToken } = useUserStore.getState();
-    // Backend reads the raw token from Xy-User-Token (no Bearer prefix).
-    if (accessToken) config.headers.set("Xy-User-Token", accessToken);
+    if (accessToken && config.headers) {
+        config.headers.Authorization = `Bearer ${accessToken}`;
+    }
     return config;
 });
 
@@ -74,7 +75,7 @@ http.interceptors.response.use(async (response) => {
             throw new AuthError(body.message, CODE_UNAUTHORIZED);
         }
         retryConfig._retried = true;
-        retryConfig.headers.set("Xy-User-Token", token);
+        retryConfig.headers.Authorization = `Bearer ${token}`;
         return http.request(retryConfig);
     }
     throw new AuthError(body?.message || "request failed", body?.code ?? -1);
@@ -88,21 +89,21 @@ export function getClickCaptcha() {
     return unwrap<ClickCaptcha>(http.get("/captcha/click"));
 }
 
-export async function login(input: { username: string; password: string; captchaId: string; captcha: string }) {
-    const result = await unwrap<LoginResult>(http.post("/member/auth/login", input));
-    useUserStore.getState().setSession({ accessToken: result.token, refreshToken: result.refreshToken, refreshExpiresIn: result.refreshExpiresIn });
+export async function login(input: { username: string; password: string; captchaId: string; captchaInfo: string }) {
+    const result = await unwrap<LoginResult>(http.post("/admin/auth/login", input));
+    useUserStore.getState().setSession({ accessToken: result.accessToken, refreshToken: result.refreshToken, refreshExpiresIn: result.refreshExpiresIn });
     const info = await getUserInfo();
-    useUserStore.getState().setSession({ user: info, accessToken: result.token });
+    useUserStore.getState().setSession({ user: info, accessToken: result.accessToken });
 }
 
 export async function getUserInfo(): Promise<LocalUser> {
-    const info = await unwrap<MemberInfo>(http.get("/member/user/info"));
+    const info = await unwrap<AdminInfo>(http.get("/admin/auth/profile"));
     return { id: String(info.id), username: info.username, displayName: info.nickname || info.username, avatarUrl: info.avatar };
 }
 
 export async function logout() {
     try {
-        await http.post("/member/auth/logout");
+        await http.post("/admin/auth/logout");
     } catch {
         // Local session is cleared regardless of the server result.
     }
@@ -123,11 +124,3 @@ export async function restoreSession() {
     }
 }
 
-export function getCanvasConfig() {
-    return unwrap<{ exists: boolean; version: number; config: string }>(http.get("/member/canvas/config"));
-}
-
-/** A stale version is not an error: the server answers conflict=true with its latest version and config. */
-export function saveCanvasConfig(version: number, config: string) {
-    return unwrap<{ conflict: boolean; version: number; config?: string }>(http.put("/member/canvas/config", { version, config }));
-}

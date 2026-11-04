@@ -18,11 +18,8 @@ type UserStore = {
     refreshToken: string;
     /** Absolute session limit (ms epoch); the server never extends it on refresh. */
     refreshExpiresAt: number;
-    /** Member id the local config JSON belongs to; kept across sign-out so a different member signing in on this browser starts from defaults. */
-    configOwnerId: string;
     setSession: (session: { user?: LocalUser | null; accessToken: string; refreshToken?: string; refreshExpiresIn?: number }) => void;
     clearSession: () => void;
-    setConfigOwner: (id: string) => void;
 };
 
 const USER_STORE_KEY = "infinite-canvas:user_store";
@@ -35,8 +32,6 @@ export const useUserStore = create<UserStore>()(
             accessToken: "",
             refreshToken: "",
             refreshExpiresAt: 0,
-            configOwnerId: "",
-            setConfigOwner: (configOwnerId) => set({ configOwnerId }),
             setSession: ({ user, accessToken, refreshToken, refreshExpiresIn }) =>
                 set((state) => ({
                     user: user === undefined ? state.user : user,
@@ -56,7 +51,7 @@ export const useUserStore = create<UserStore>()(
                 setItem: (name, value) => localForageStorage.setItem(name, JSON.stringify(value)),
                 removeItem: (name) => localForageStorage.removeItem(name),
             },
-            partialize: (state) => ({ user: state.user, refreshToken: state.refreshToken, refreshExpiresAt: state.refreshExpiresAt, configOwnerId: state.configOwnerId }) as never,
+            partialize: (state) => ({ user: state.user, refreshToken: state.refreshToken, refreshExpiresAt: state.refreshExpiresAt }) as never,
             onRehydrateStorage: () => () => {
                 useUserStore.setState({ hydrated: true });
             },

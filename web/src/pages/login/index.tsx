@@ -26,11 +26,11 @@ export default function LoginPage() {
 
     if (accessToken) return <Navigate to={from} replace />;
 
-    const submit = async (captchaId: string, captcha: string) => {
+    const submit = async (captchaId: string, captchaInfo: string) => {
         if (!credentials) return;
         setLoading(true);
         try {
-            await login({ ...credentials, captchaId, captcha });
+            await login({ ...credentials, captchaId, captchaInfo });
         } catch (error) {
             message.error(error instanceof Error && error.message ? error.message : t("auth.loginFailed"));
         } finally {
