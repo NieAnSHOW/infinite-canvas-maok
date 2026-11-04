@@ -2,6 +2,7 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { proxyFetch } from "./proxy-helpers";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
@@ -469,11 +470,11 @@ function consumeResponseStreamText(state: ResponseStreamState, text: string, onD
     }
 }
 
-async function requestStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const response = await fetch(aiApiUrl(config, "/responses"), {
+async function requestStreamingResponse(config: AiConfig & { channelId: string }, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    const response = await proxyFetch(config.channelId, "/v1/responses", {
         method: "POST",
-        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
         body: JSON.stringify({ ...body, stream: true }),
+        contentType: "application/json",
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
@@ -576,11 +577,12 @@ function toGeminiToolOptions(tools: ResponseFunctionTool[], toolChoice: ToolChoi
     };
 }
 
-async function requestGeminiStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const response = await fetch(`${geminiApiUrl(config, "streamGenerateContent")}?alt=sse`, {
+async function requestGeminiStreamingResponse(config: AiConfig & { channelId: string }, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    const path = `/v1beta/models/${encodeURIComponent(geminiModelName(config.model))}:streamGenerateContent?alt=sse`;
+    const response = await proxyFetch(config.channelId, path, {
         method: "POST",
-        headers: geminiHeaders(config),
         body: JSON.stringify(body),
+        contentType: "application/json",
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
@@ -659,20 +661,23 @@ async function requestGeminiImages(config: AiConfig, prompt: string, references:
     return (await Promise.all(requests)).flat();
 }
 
-async function requestGeminiImagesOnce(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+async function requestGeminiImagesOnce(config: AiConfig & { channelId: string }, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const parts: GeminiPart[] = [{ text: prompt }];
     for (const image of references) {
         parts.push(toGeminiImagePart(await imageToDataUrl(image)));
     }
-    const response = await axios.post<GeminiPayload>(
-        geminiApiUrl(config, "generateContent"),
-        {
-            ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"], ...resolveGeminiImageConfig(config) } }),
-            contents: [{ role: "user", parts }],
-        },
-        { headers: geminiHeaders(config), signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS },
-    );
-    return parseGeminiImagePayload(response.data);
+    const body = {
+        ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"], ...resolveGeminiImageConfig(config) } }),
+        contents: [{ role: "user", parts }],
+    };
+    const path = `/v1beta/models/${encodeURIComponent(geminiModelName(config.model))}:generateContent`;
+    const response = await proxyFetch(config.channelId, path, {
+        method: "POST",
+        body: JSON.stringify(body),
+        contentType: "application/json",
+        signal: options?.signal,
+    });
+    return parseGeminiImagePayload(await response.json() as GeminiPayload);
 }
 
 function parseGeminiImagePayload(payload: GeminiPayload) {
@@ -725,26 +730,24 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestSize = resolveRequestSize(config.size);
     const background = normalizeBackground(config.background);
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(requestConfig, "/images/generations"),
-            {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                n,
-                ...(quality ? { quality } : {}),
-                ...(requestSize ? { size: requestSize } : {}),
-                ...(background ? { background } : {}),
-                // gpt-image models reject response_format; they always return b64.
-                ...(/gpt-image/.test(requestConfig.model) ? {} : { response_format: "b64_json" }),
-                output_format: IMAGE_OUTPUT_FORMAT,
-            },
-            {
-                headers: aiHeaders(requestConfig, "application/json"),
-                signal: options?.signal,
-                timeout: IMAGE_REQUEST_TIMEOUT_MS,
-            },
-        );
-        const images = await parseImagePayload(response.data);
+        const body = {
+            model: requestConfig.model,
+            prompt: withSystemPrompt(requestConfig, prompt),
+            n,
+            ...(quality ? { quality } : {}),
+            ...(requestSize ? { size: requestSize } : {}),
+            ...(background ? { background } : {}),
+            ...(/gpt-image/.test(requestConfig.model) ? {} : { response_format: "b64_json" }),
+            output_format: IMAGE_OUTPUT_FORMAT,
+        };
+        const response = await proxyFetch(requestConfig.channelId, "/v1/images/generations", {
+            method: "POST",
+            body: JSON.stringify(body),
+            contentType: "application/json",
+            signal: options?.signal,
+        });
+        const data = await response.json() as ImageApiResponse;
+        const images = await parseImagePayload(data);
         return images;
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
@@ -810,8 +813,19 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     files.forEach((file) => formData.append(imageField, file));
 
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS });
-        const images = await parseImagePayload(response.data);
+        // FormData 转为二进制并保留 boundary
+        const tempResponse = new Response(formData);
+        const contentType = tempResponse.headers.get("Content-Type") || "multipart/form-data";
+        const formDataBytes = new Uint8Array(await tempResponse.arrayBuffer());
+        
+        const response = await proxyFetch(requestConfig.channelId, "/v1/images/edits", {
+            method: "POST",
+            body: formDataBytes,
+            contentType,
+            signal: options?.signal,
+        });
+        const data = await response.json() as ImageApiResponse;
+        const images = await parseImagePayload(data);
         return images;
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
@@ -856,23 +870,25 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
 }
 
-export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
+export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat"> & { channelId: string }) {
     try {
-        if (config.apiFormat === "minimax") return ["MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max", "MiniMax-M3.1-Flash"]; // MiniMax has no model-list endpoint; these are the documented video models plus the M3.1-Flash text model used for video understanding.
+        if (config.apiFormat === "minimax") return ["MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max", "MiniMax-M3.1-Flash"];
         if (config.apiFormat === "gemini") {
-            const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
-            validateGeminiPayload(response.data);
-            return (response.data.models || [])
+            const response = await proxyFetch(config.channelId, "/v1beta/models", {
+                method: "GET",
+            });
+            const data = await response.json() as GeminiPayload;
+            validateGeminiPayload(data);
+            return (data.models || [])
                 .map((model) => model.name?.replace(/^models\//, ""))
                 .filter((id): id is string => Boolean(id))
                 .sort((a, b) => a.localeCompare(b));
         }
-        const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
-            headers: {
-                Authorization: `Bearer ${config.apiKey}`,
-            },
+        const response = await proxyFetch(config.channelId, "/v1/models", {
+            method: "GET",
         });
-        return (response.data.data || [])
+        const data = await response.json() as { data?: Array<{ id?: string }>; error?: { message?: string } };
+        return (data.data || [])
             .map((model) => model.id)
             .filter((id): id is string => Boolean(id))
             .sort((a, b) => a.localeCompare(b));
@@ -882,7 +898,7 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
 }
 
 export async function fetchChannelModels(channel: ModelChannel) {
-    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
+    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat, channelId: channel.id });
 }
 
 const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt"> = {

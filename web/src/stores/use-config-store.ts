@@ -440,6 +440,7 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     const channel = resolveModelChannel(config, value);
     return {
         ...config,
+        channelId: channel.id,
         model: modelOptionName(value || config.model),
         baseUrl: channel.baseUrl,
         apiKey: channel.apiKey,
@@ -506,4 +507,9 @@ export function withLocalProxy(url: string) {
     const base = normalizeLocalProxyUrl(proxyUrl);
     if (!base || url.startsWith(`${base}/`)) return url;
     return `${base}/${url}`;
+}
+
+export function getChannelById(channelId: string): ModelChannel | undefined {
+    const { channels } = useConfigStore.getState().config;
+    return channels.find(ch => ch.id === channelId);
 }

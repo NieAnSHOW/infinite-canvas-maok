@@ -4,6 +4,7 @@ import i18n from "@/i18n";
 import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig } from "@/stores/use-config-store";
+import { proxyFetch } from "./proxy-helpers";
 import { runModelPlugin } from "./model-plugin";
 
 type RequestOptions = { signal?: AbortSignal };
@@ -47,20 +48,23 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
     const instructions = config.audioInstructions.trim();
 
     try {
-        const response = await axios.post<Blob>(
-            aiApiUrl(requestConfig, "/audio/speech"),
-            {
-                model,
-                input: prompt,
-                voice: normalizeAudioVoiceValue(config.audioVoice),
-                response_format: format,
-                speed: Number(normalizeAudioSpeedValue(config.audioSpeed)),
-                ...(instructions ? { instructions } : {}),
-            },
-            { headers: aiHeaders(requestConfig), responseType: "blob", signal: options?.signal },
-        );
-        await assertAudioBlob(response.data);
-        return response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: audioMimeType(format) });
+        const body = {
+            model,
+            input: prompt,
+            voice: normalizeAudioVoiceValue(config.audioVoice),
+            response_format: format,
+            speed: Number(normalizeAudioSpeedValue(config.audioSpeed)),
+            ...(instructions ? { instructions } : {}),
+        };
+        const response = await proxyFetch(requestConfig.channelId, "/v1/audio/speech", {
+            method: "POST",
+            body: JSON.stringify(body),
+            contentType: "application/json",
+            signal: options?.signal,
+        });
+        const blob = await response.blob();
+        await assertAudioBlob(blob);
+        return blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audioMimeType(format) });
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
     }

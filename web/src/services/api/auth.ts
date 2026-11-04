@@ -124,3 +124,11 @@ export async function restoreSession() {
     }
 }
 
+export function getCanvasConfig() {
+    return unwrap<{ exists: boolean; version: number; config: string }>(http.get("/admin/canvas/config"));
+}
+
+export function saveCanvasConfig(version: number, config: string) {
+    return unwrap<{ conflict: boolean; version: number; config?: string }>(http.put("/admin/canvas/config", { version, config }));
+}
+

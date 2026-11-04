@@ -2,6 +2,7 @@ import axios, { type AxiosRequestConfig } from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, withLocalProxy, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { proxyFetch } from "./proxy-helpers";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -44,19 +45,35 @@ function pluginUrl(config: AiConfig, path: string) {
     return buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`);
 }
 
-function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHttp {
+function createPluginHttp(config: AiConfig & { channelId: string }, options?: RequestOptions): PluginHttp {
     const run = async (method: "get" | "post", path: string, body: unknown, opts?: PluginHttpOptions) => {
         const isForm = typeof FormData !== "undefined" && body instanceof FormData;
-        const response = await axios.request({
-            method,
-            url: pluginUrl(config, path),
-            data: method === "post" ? body : undefined,
-            params: opts?.params,
-            headers: pluginHeaders({ Authorization: `Bearer ${config.apiKey}`, ...opts?.headers }, method === "post" && !isForm && body !== undefined),
-            responseType: opts?.responseType || "json",
+        let bodyData: string | Uint8Array | undefined;
+        let contentType = opts?.headers?.["Content-Type"];
+        
+        if (method === "post" && body !== undefined) {
+            if (isForm) {
+                const tempResponse = new Response(body as FormData);
+                contentType = tempResponse.headers.get("Content-Type") || "multipart/form-data";
+                bodyData = new Uint8Array(await tempResponse.arrayBuffer());
+            } else {
+                bodyData = JSON.stringify(body);
+                contentType = contentType || "application/json";
+            }
+        }
+        
+        const response = await proxyFetch(config.channelId, path, {
+            method: method.toUpperCase() as "GET" | "POST",
+            body: bodyData,
+            contentType,
             signal: options?.signal,
         });
-        return response.data;
+        
+        const responseType = opts?.responseType || "json";
+        if (responseType === "blob") return await response.blob();
+        if (responseType === "text") return await response.text();
+        if (responseType === "arraybuffer") return await response.arrayBuffer();
+        return await response.json();
     };
     return {
         url: (path) => pluginUrl(config, path),
@@ -66,10 +83,36 @@ function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHtt
 }
 
 /** Raw request with no automatic auth header — the script controls method, url, headers, body entirely. */
-function createPluginRequest(config: AiConfig, options?: RequestOptions) {
+function createPluginRequest(config: AiConfig & { channelId: string }, options?: RequestOptions) {
     return async (requestConfig: AxiosRequestConfig & { url: string }) => {
-        const response = await axios.request({ ...requestConfig, url: pluginUrl(config, requestConfig.url), signal: options?.signal });
-        return response.data;
+        const method = (requestConfig.method || "GET").toUpperCase() as "GET" | "POST" | "PUT" | "DELETE";
+        const isForm = typeof FormData !== "undefined" && requestConfig.data instanceof FormData;
+        let bodyData: string | Uint8Array | undefined;
+        let contentType = requestConfig.headers?.["Content-Type"];
+        
+        if (requestConfig.data !== undefined) {
+            if (isForm) {
+                const tempResponse = new Response(requestConfig.data as FormData);
+                contentType = tempResponse.headers.get("Content-Type") || "multipart/form-data";
+                bodyData = new Uint8Array(await tempResponse.arrayBuffer());
+            } else {
+                bodyData = JSON.stringify(requestConfig.data);
+                contentType = contentType || "application/json";
+            }
+        }
+        
+        const response = await proxyFetch(config.channelId, requestConfig.url, {
+            method,
+            body: bodyData,
+            contentType,
+            signal: options?.signal,
+        });
+        
+        const responseType = requestConfig.responseType || "json";
+        if (responseType === "blob") return await response.blob();
+        if (responseType === "text") return await response.text();
+        if (responseType === "arraybuffer") return await response.arrayBuffer();
+        return await response.json();
     };
 }
 
