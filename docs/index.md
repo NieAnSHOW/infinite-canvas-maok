@@ -38,4 +38,4 @@
 ## Notes
 
 - Canvas projects and My Assets are primarily stored in the browser. WebDAV can be configured for cross-device synchronization.
-- The AI API key is stored in the browser, which sends requests directly to OpenAI-compatible endpoints.
+- The AI API key is stored in the browser, which sends requests directly to OpenAI-compatible endpoints. After signing in, channels and API keys are also saved per account in xihong-admin, where an administrator can read them.

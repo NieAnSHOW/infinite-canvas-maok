@@ -359,6 +359,7 @@ export default {
         lightTheme: "Switch to light theme",
         darkTheme: "Switch to dark theme",
     },
+    auth: { title: "Sign in", username: "Username", password: "Password", usernameRequired: "Please enter your username", passwordRequired: "Please enter your password", submit: "Sign in", loginFailed: "Sign-in failed. Please try again later", captchaTitle: "Security check", captchaTip: "Click in order: {{text}}", captchaLoadFailed: "Failed to load the captcha. Refresh and try again", captchaRefresh: "Refresh", logout: "Sign out" },
     home: {
         promptError: "Failed to load prompts",
         description: "Generate, connect, and reshape <content>images, text, and graphics</content> in <canvas>Infinite Canvas</canvas>, turning one-off generations into a continuous creative process.",

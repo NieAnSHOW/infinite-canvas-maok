@@ -59,9 +59,13 @@ See [Third-party Prompt Sources](/docs/overview/third-party-prompt-repositories)
 - Export and import channel, model, generation, prompt-source, and WebDAV settings.
 - Store application data and API credentials locally in the browser.
 - Use WebDAV for optional cross-device synchronization.
+- Sign-in is required for every page except `/login`; accounts are created by an administrator in xihong-admin (no registration). Login uses a click captcha; the access token stays in memory and the refresh token is persisted locally for automatic renewal.
+
+- Bind configuration to the signed-in account: after sign-in the app pulls that member's saved configuration (channels, default models, generation preferences, prompt sources, WebDAV) from xihong-admin and applies it; later local edits upload the whole JSON about two seconds later and bump the version, and a version conflict makes the server copy win. A fresh browser with only default settings never uploads, so it cannot overwrite real configuration from another browser. Signing in as a different member on the same browser resets to defaults before pulling, so one account's channels and API keys never reach another.
+- Read-only admin audit: the xihong-admin canvas configuration list shows member ID, version, size, and update time, supports filtering by member ID and viewing the full configuration JSON, offers no edit or delete, and rejects member tokens on the admin audit endpoints.
 
 ## Current limitations
 
-- The project is frontend-first and does not provide built-in cloud accounts or cloud storage.
-- API keys remain in browser storage and requests are sent directly to configured providers.
+- The project does not provide built-in cloud storage; sign-in depends on an external xihong-admin service reached through the `/xyapi` dev proxy.
+- API keys are kept in browser storage and requests are sent directly to configured providers; after sign-in the channels and keys are also stored per account in xihong-admin, where an administrator can read the full configuration through the audit page, so this suits personal or trusted environments only.
 - Production Docker static-resource paths still require broader deployment verification.

@@ -359,6 +359,7 @@ export default {
         lightTheme: "切换到浅色主题",
         darkTheme: "切换到深色主题",
     },
+    auth: { title: "登录", username: "用户名", password: "密码", usernameRequired: "请输入用户名", passwordRequired: "请输入密码", submit: "登录", loginFailed: "登录失败，请稍后重试", captchaTitle: "安全验证", captchaTip: "请依次点击：{{text}}", captchaLoadFailed: "验证码加载失败，请刷新重试", captchaRefresh: "换一张", logout: "退出登录" },
     home: {
         promptError: "获取提示词失败",
         description: "在 <canvas>无限画布</canvas> 中生成、连接和重组 <content>图片、文字与图形</content>，让创作从单次生成变成连续推演。",

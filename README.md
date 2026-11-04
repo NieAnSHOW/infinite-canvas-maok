@@ -128,7 +128,7 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地；登录后渠道和 API Key 会随账号存入 xihong-admin。
 
 ### 本地开发
 
